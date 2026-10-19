@@ -3,3 +3,4 @@ data/
 model.joblib
 __pycache__/
 .DS_Store
+predictions.db

@@ -1,5 +1,9 @@
 import joblib
 import streamlit as st
+from db import init_db, log_prediction
+
+MODEL_VERSION = "v1-tfidf-logreg-balanced"
+init_db()
 
 
 @st.cache_resource
@@ -30,3 +34,7 @@ if headline:
     top3 = probs.argsort()[::-1][:3]
     for i in top3:
         st.write(f"{model.classes_[i]}: {probs[i]:.0%}")
+    if st.session_state.get("last_logged") != headline:
+        st.session_state["row_id"] = log_prediction(
+            headline, prediction, confidence, MODEL_VERSION)
+        st.session_state["last_logged"] = headline

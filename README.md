@@ -154,7 +154,7 @@ Committed once Steps 1–3 worked, before starting the app, so there is a known-
 **What:** a text box for a headline. The app shows the predicted category, a confidence percentage with a progress bar, a warning below 50% confidence, and the top 3 categories.
 
 **How:**
-- The model is loaded once with `@st.cache_resource`. Streamlit re-runs the whole script on every interaction, so without caching the 6.9 MB model would be reloaded on every keypress.
+- The model is loaded once with `@st.cache_resource`. Streamlit re-runs the whole script on every interaction, so without caching the 6.9 MB model would be reloaded on every interaction (each submitted headline, each button click).
 - `predict_proba` returns all 16 probabilities. `argmax` picks the winner, and `model.classes_` maps positions to category names. `argsort()[::-1][:3]` gives the top 3.
 
 **What testing showed:**
@@ -169,6 +169,28 @@ Committed once Steps 1–3 worked, before starting the app, so there is a known-
 - **Confident doesn't mean correct.** The Apple headline is really both tech and business, yet the model says 99% tech. Per-word contributions showed why: "apple", "iphone" and "launch" voted strongly for SCIENCE & TECH (≈ +6.8 together), and only "stock" leaned towards BUSINESS (+0.7). Softmax turns that score gap into ≈ 400× odds. **Confidence measures how consistent the training data was, not how ambiguous the headline really is.** The warning can only catch cases where the model itself is torn.
 - **Bias from the dataset:** the data is US-centric (HuffPost), so headlines mentioning another country (e.g. "India") lean towards WORLD, regardless of their actual topic.
 - **The top 3 list makes uncertainty visible**, e.g. ENTERTAINMENT vs FAMILY for a celebrity wedding.
+
+### Step 6: Log predictions to SQLite (`db.py`)
+
+**Why:** to see what real users type, how the model performs on it, and to collect corrections that can later become training data (a feedback loop).
+
+**Table `predictions`:**
+
+| Column | Purpose |
+|---|---|
+| `id` | Auto-incrementing key, used to attach feedback to the right row |
+| `created_at` | ISO timestamp (sorts correctly as text) |
+| `headline`, `predicted`, `confidence` | What was asked and what the model answered |
+| `model_version` | Which model answered, so v1 and v2 can be compared on real traffic |
+| `is_correct`, `correct_label` | User feedback; empty (NULL) until given |
+
+**Design choices:**
+- The database code lives in its own module, so the FastAPI service can reuse it.
+- `?` placeholders are used in every query, so user input is stored as data and never run as SQL (prevents SQL injection).
+- Streamlit re-runs the script on every interaction, so `st.session_state` remembers the last logged headline. Otherwise each rerun would log the same prediction again.
+- `predictions.db` is git-ignored, because it contains what users typed.
+
+**First real log rows** showed typical messy user input: a partly typed headline (`Iphone launc`) was submitted, and still got 98% SCIENCE & TECH from the single word "iphone". User-submitted text and labels need review before they are used for retraining.
 
 ---
 
