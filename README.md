@@ -38,6 +38,7 @@ news-category-classifier/
 ├── train.py               # Steps 2–3: cleaning, split, training, evaluation
 ├── app.py                 # Step 4: Streamlit UI (prediction, confidence, top 3, feedback)
 ├── db.py                  # Step 6: SQLite logging of predictions and feedback
+├── api.py                 # Step 7: FastAPI service (/predict, /health)
 ├── results.md             # evaluation report for every training run (appended automatically)
 ├── sample_data.csv        # 50-row toy dataset used for the first prototype
 ├── requirements.txt
@@ -64,6 +65,7 @@ Then download the dataset into `data/` (see [Dataset](#dataset)) and run:
 python explore.py   # look at the data
 python train.py     # clean, split, train, save model.joblib and append to results.md
 streamlit run app.py   # open the web app at http://localhost:8501
+uvicorn api:app --reload   # start the API; docs at http://127.0.0.1:8000/docs
 ```
 
 ## Results
@@ -200,6 +202,31 @@ Committed once Steps 1–3 worked, before starting the app, so there is a known-
 - Known limitation: a user who submits without reading the dropdown records "correct" even when it isn't.
 
 Verified: "Apple stock has increased after iPhone launch" was stored as `is_correct = 0`, `correct_label = BUSINESS`, and "New Iphone 18 has been launched" as `is_correct = 1`.
+
+### Step 7: FastAPI service (`api.py`)
+
+**Why an API as well as Streamlit:** Streamlit is a UI for humans. An API lets *programs* get predictions over HTTP + JSON: a React frontend, a mobile app or another service, in any language. The model still runs on the server; clients only ever receive predictions. It also separates the UI from the model, so each can change or scale on its own.
+
+**Endpoints:**
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/predict` | Body `{"headline": "..."}` → `{"category": ..., "confidence": ...}` |
+| `GET` | `/health` | `{"status": "ok", "model_loaded": true}`, for Docker and Cloud Run health checks |
+| `GET` | `/docs` | Interactive documentation, generated automatically by FastAPI |
+
+**Design choices:**
+- The model is loaded once at server start (module level). FastAPI doesn't re-run the file per request, unlike Streamlit.
+- **Pydantic request/response models** act as a contract. Invalid requests are rejected with **422** before the model runs: a missing field gives `missing`, and an empty headline gives `string_too_short`.
+- `POST`, not `GET`, for `/predict`, because the headline is sent in the request body rather than the URL.
+- **Bug found and fixed:** a headline of only spaces (`"   "`) passed `min_length=1` and returned `200 WELLNESS 9%`. That's a meaningless answer: zero words, so the prediction comes only from the model's intercepts. Fixed with `ConfigDict(str_strip_whitespace=True)`, so whitespace is stripped before validation and the request gets 422.
+- Consistency check: the API and the Streamlit app both return SPORTS at 59.35% for the same headline, which confirms they share one model file (logistic regression is deterministic).
+
+**Logging.** `/predict` reuses `log_prediction` from `db.py`, so API and Streamlit predictions go into the same `predictions` table. The response includes a `prediction_id` (the row id), a receipt number that a client can use to send feedback later.
+- Unlike Streamlit, the API logs **every** request, including the same headline sent twice. Each API call is a separate, deliberate event; Streamlit's duplicates were side effects of reruns, not real user actions. **Rule: one log row per real event.**
+- Known issue: `MODEL_VERSION` is defined in both `app.py` and `api.py`. It should live in one place before the first retrain, so logged versions can't drift apart.
+
+Run it with `uvicorn api:app --reload` and open http://127.0.0.1:8000/docs.
 
 ---
 
