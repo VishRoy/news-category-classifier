@@ -41,7 +41,8 @@ news-category-classifier/
 ├── api.py                 # Step 7: FastAPI service (/predict, /feedback, /health)
 ├── results.md             # evaluation report for every training run (appended automatically)
 ├── sample_data.csv        # 50-row toy dataset used for the first prototype
-├── requirements.txt
+├── requirements-api.txt   # pinned packages for the API image
+├── requirements.txt       # everything for local development (includes the API file)
 └── README.md
 ```
 
@@ -240,6 +241,42 @@ Verified: "Apple stock has increased after iPhone launch" was stored as `is_corr
 - **Bug found:** a typo inside a SQL string (`predcited`) caused a **500**. Python doesn't check SQL text, so this kind of error only shows up when the query runs. This is a strong argument for automated tests that call every endpoint (Step 8).
 
 Run it with `uvicorn api:app --reload` and open http://127.0.0.1:8000/docs.
+
+### Step 8: Docker, then hosting (planned)
+
+**Why Docker comes before hosting:** a host such as Render or Cloud Run starts the API on a fresh, empty machine. That machine has no Python 3.13, no venv, no installed packages (or the exact versions we used), and no `model.joblib`, which is git-ignored and therefore not on GitHub. A Docker image packages all of this (OS base, Python, pinned packages, code, model) into one unit that runs the same on any machine. Packing comes before moving house.
+
+Order: **Docker image → test the container locally → push to a registry → host it (public URL) → CI/CD to automate it all.** Hosting without Docker is possible on some platforms (Render can run Python directly), but the missing model and version pinning would still have to be solved, Cloud Run requires a container, and an image lets us switch hosts without changes.
+
+**What goes inside the image**, found by reading `api.py` line by line: Python 3.13, pinned packages, the code (`api.py`, `db.py`), the model (`model.joblib`), the start command (`uvicorn ...`) and a port.
+
+**Step 8a: pin exact versions.** Without `==`, Docker installs whatever is newest on build day, which could be a scikit-learn or numpy version that can't load `model.joblib`. Versions were taken from `pip freeze` in the venv the model was trained with (Python 3.13.12). numpy and scipy are pinned too: they aren't imported directly, but the saved model depends on them.
+
+Two files, so the API image stays small and each version is written once:
+
+| File | Contents | Used by |
+|---|---|---|
+| `requirements-api.txt` | fastapi, uvicorn, pydantic, joblib, scikit-learn, scipy, numpy | The Docker image |
+| `requirements.txt` | `-r requirements-api.txt` + pandas, streamlit | Local development (training, UI) |
+
+Streamlit and pandas are left out of the API image because the API doesn't use them, and Streamlit alone pulls in hundreds of MB of dependencies. A smaller image means faster builds, deploys and cold starts, and less third-party code to patch.
+
+---
+
+## Known issues and decisions to revisit
+
+Problems we know about but have deliberately postponed, with the reason and the planned fix, so nothing is forgotten.
+
+| Issue | Why it matters | Planned fix | When |
+|---|---|---|---|
+| **SQLite file is wiped on cloud hosts** | Cloud Run and similar hosts use temporary disks. When the container restarts, scales or redeploys, `predictions.db` and all logged predictions and feedback disappear without warning (like leaving things in a hotel room at checkout). | Move logging to a managed database outside the container (e.g. Postgres). Only `db.py` needs to change, because all database code lives there. | At deployment (Step 8) |
+| ~~**scikit-learn version must match**~~ ✅ fixed | A model saved with one scikit-learn version may fail to load, or behave differently, under another. | Direct dependencies pinned with `==` in `requirements-api.txt` (Step 8a). | Done |
+| **Indirect dependencies aren't pinned** | Packages our packages depend on (e.g. starlette, pydantic-core) are only constrained with `>=`, so a future build could still pull different versions. | Generate a full lock file (e.g. `pip freeze` in the container, or a tool like pip-tools or uv) and install from it. | Before production deployment |
+| **`model.joblib` isn't in git** | A fresh machine or host has no model file, so `api.py` would fail on startup. | Copy the model into the Docker image, or train it during the image build. | Docker (Step 8) |
+| **`MODEL_VERSION` is defined twice** (`app.py` and `api.py`) | After a retrain, updating one and forgetting the other makes logged versions wrong and breaks v1-vs-v2 comparisons. | Move it to one shared place (e.g. a `config.py`). | Before the first retrain |
+| **Feedback can be careless or malicious** | Users can submit without reading the dropdown, or send deliberately wrong labels through `/feedback`. | Review feedback before retraining; ship a new model only if it beats the current one on a fixed test set. | Retraining step |
+| **Confidence ≠ correctness** | Strong words (e.g. "apple", "iphone") can produce 99% confidence on headlines that really belong to two categories. | Show the top 3 (done); later compare with DistilBERT and consider probability calibration. | Model improvement |
+| **US-centric training data** | Headlines mentioning other countries lean towards WORLD regardless of topic. | Monitor live accuracy by region; add non-US training data. | After launch |
 
 ---
 
