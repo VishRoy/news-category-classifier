@@ -203,6 +203,89 @@ Verified: "Apple stock has increased after iPhone launch" was stored as `is_corr
 
 ---
 
+## Interview prep
+
+Questions an interviewer might ask about this project, with model answers based on what was actually built. Click a question to see its answer. A good answer follows the pattern **what I saw → what I checked → what I concluded → what I did**, with at least one real number or example.
+
+### Data and labels
+
+<details>
+<summary><b>Q1. You started with 50 rows and got 20% accuracy. How did you work out it was the data and not a bug in your code?</b></summary>
+
+"Accuracy was 0.20, which with 5 balanced classes is exactly random chance, so I suspected the model wasn't learning anything rather than learning the wrong thing. I printed each test headline with its prediction and checked which of its words were in the vocabulary. Almost none were. The vocabulary was only 218 words, so most test headlines matched only filler words like 'the' and 'with'. The confidence on every prediction was about 0.25, barely above the 0.20 of a uniform guess. So the code was fine; 40 training rows just couldn't cover the vocabulary. I switched to a 200k-row dataset and accuracy went to 72%."
+
+*Key points: compare with a baseline (random chance), show evidence (vocabulary size, matched words, confidence), and a fix that confirmed the diagnosis. The toy data was perfectly balanced, so imbalance was not the cause.*
+</details>
+
+<details>
+<summary><b>Q2. The dataset had 42 categories. How did you decide on 16, and why not put the unclear ones into an "OTHER" class?</b></summary>
+
+"I grouped the 42 labels by what the headline is *about*, since that's all the model sees. Three kinds of fixes: merging renamed labels, like WORLDPOST and THE WORLDPOST; merging overlapping topics, like TECH and SCIENCE; and dropping labels that describe the *audience* or *tone* rather than the topic, like BLACK VOICES or WEIRD NEWS, because a politics story could carry any of them. I didn't create an OTHER class because its headlines would share no vocabulary, so the model couldn't learn what makes something 'other'. I also made judgement calls, like keeping ARTS separate from ENTERTAINMENT because gallery and theatre headlines use different words from celebrity news."
+
+*Key points: the unclear labels were dropped, not kept. Explain why OTHER fails (no shared vocabulary).*
+</details>
+
+<details>
+<summary><b>Q3. What is data leakage? Give two concrete places in your project where it could have happened.</b></summary>
+
+"Data leakage is when information from the test set, or from the future, gets into training, so the evaluation is better than real performance. In my project there were two risks. First, the TF-IDF vectorizer: if I'd fit it on the full dataset, the vocabulary and the IDF weights would include the test headlines. I prevented that by putting it in a Pipeline that's fit only on the training split. Second, duplicates: the dataset had more than 1,300 repeated headlines. If one copy lands in train and another in test, the model is tested on something it memorised. So I deduplicated on the text column, the only thing the model sees, before splitting."
+</details>
+
+### Model and evaluation
+
+<details>
+<summary><b>Q4. Your baseline had 72% accuracy, but you shipped the 69% model. Defend that to a product manager who only cares about accuracy.</b></summary>
+
+"Accuracy hid a problem. The baseline scored 72%, but it rarely predicted small categories: it caught only 31% of education headlines and 35% of religion ones, because it leaned towards the big classes. With balanced class weights, accuracy dropped 3 points, but recall on those small categories roughly doubled, and the macro-F1 (the average quality across all categories) stayed the same at 0.63. So we didn't lose quality; we spread it more fairly. For an app where users type news on any topic, a model that ignores six categories is a worse product than one that's 3 points lower overall."
+
+*Key points: with 16 classes, always predicting POLITICS scores only 19.8%, so the real problem was low recall on small classes. Macro-F1 unchanged means errors were traded, not added. Frame it around users.*
+</details>
+
+<details>
+<summary><b>Q5. Explain precision vs. recall using one category from your project.</b></summary>
+
+"Take EDUCATION in my baseline model. Precision was 0.59: when the model said 'education', it was right 59% of the time. Recall was 0.31: of all the real education headlines in the test set, it found only 31%; the rest were mostly labelled as politics. So the model was cautious: when it predicted education it was usually right, but it rarely did. After balancing the class weights, recall went up to 0.62 and precision went down to 0.31. That's the typical trade-off: predict a class more often, and you catch more of it but you're wrong more often."
+
+*Memory trick: precision looks at your **net** (how much of what you caught is right?), recall looks at the **lake** (how many of the real ones did you catch?). Both are per category.*
+</details>
+
+<details>
+<summary><b>Q6. Why use a scikit-learn Pipeline instead of fitting the vectorizer and the classifier separately?</b></summary>
+
+"The Pipeline bundles TF-IDF and Logistic Regression into a single object. That gives me three guarantees. First, calling `fit` on the training split fits the vectorizer only on training data, so the test vocabulary can't leak in. Second, `predict` in my Streamlit app automatically applies exactly the same text processing as in training. Third, I save one `model.joblib` file, so the vocabulary and the classifier weights can never get out of sync. Without it, I could accidentally fit the vectorizer on all the data, or deploy a new vectorizer with an old classifier; the code would run, but the predictions would be wrong."
+</details>
+
+### Product and engineering
+
+<details>
+<summary><b>Q7. A headline clearly about both business and tech got 99% TECH. Why, and what does that say about confidence scores?</b></summary>
+
+"I looked at how much each word contributed. 'Apple', 'iPhone' and 'launch' voted strongly for TECH (about +6.8 together), because in the training data those words almost always appeared in tech headlines. Only 'stock' leaned towards business, at +0.7. Softmax turns that score gap into roughly 400-to-1 odds, so 99%. The lesson is that confidence measures how consistent the training data was for these words, not whether the answer is right or whether the headline is ambiguous. So in the app I show the top 3 categories and a low-confidence warning, and I treat confidence as a hint, not a guarantee."
+
+*Key points: the cause is learned word weights, not words repeating in the headline. Softmax amplifies score gaps.*
+</details>
+
+<details>
+<summary><b>Q8. You log user feedback. Why not retrain on it automatically every night?</b></summary>
+
+"Three reasons. First, label quality: feedback can be careless (people clicking Submit without reading) or even malicious, and the model would learn those mistakes. Second, bias: the people who give feedback, and the headlines they correct, aren't representative of all traffic. Third, and most important, there's no safety check. A new model should be evaluated on a fixed held-out test set and compared with the current one before deployment. That's why I log `model_version`: so I can compare v1 and v2 on real traffic. So feedback goes into a review queue, gets checked, is merged with the original training data, and the retrained model only ships if it beats the current one."
+
+*Keyword: MLOps (monitoring, retraining pipelines, evaluation gates). Typos are realistic input; the bigger risks are bad labels and shipping without comparison.*
+</details>
+
+<details>
+<summary><b>Q9. Streamlit reruns the whole script on every click. What problems did that cause, and how did you solve them?</b></summary>
+
+"Streamlit re-executes the whole script on every interaction, which caused three problems. One: the model would reload from disk each time, so I cached it with `st.cache_resource`. Two: every rerun would log the same prediction again, because the headline is still in the text box, so I stored the last logged headline in `session_state` and only insert when it changes. Three: the feedback form had to update the right database row, so I keep the row id in `session_state`, give the dropdown a key per row so it resets for each new headline, and rely on `st.button` returning True only on the click's own rerun. I even hit an indentation bug where a heading only appeared on the first run, which is a typical rerun issue."
+</details>
+
+### Not yet practised
+
+- **Q10.** If you had one week to improve macro-F1 above 0.63, what would you try first, and how would you know whether it worked?
+- **Q11.** Your training data comes from a US news site. You're launching in India. What problems do you expect, and how would you detect them after launch?
+
+---
+
 ## Roadmap
 
 - [x] Explore the data
