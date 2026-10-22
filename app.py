@@ -1,6 +1,6 @@
 import joblib
 import streamlit as st
-from db import init_db, log_prediction
+from db import init_db, log_prediction, save_feedback
 
 MODEL_VERSION = "v1-tfidf-logreg-balanced"
 init_db()
@@ -38,3 +38,16 @@ if headline:
         st.session_state["row_id"] = log_prediction(
             headline, prediction, confidence, MODEL_VERSION)
         st.session_state["last_logged"] = headline
+
+    st.subheader("Was this correct?")
+
+    correct_label = st.selectbox(
+        "Correct category",
+        model.classes_,
+        index=int(best),
+        key=f"label_{st.session_state['row_id']}",
+    )
+    if st.button("Submit feedback"):
+        save_feedback(st.session_state["row_id"],
+                      correct_label == prediction, correct_label)
+        st.success("Thanks! Feedback saved.")

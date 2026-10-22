@@ -2,7 +2,7 @@
 
 A machine learning project that reads a news headline and predicts the article's category (for example **Politics**, **Sports**, **Business**, **Science & Tech** or **Entertainment**) with a confidence score.
 
-> **Status:** in progress. The data has been explored and cleaned, and a TF-IDF + Logistic Regression model (balanced class weights) is trained and saved. A Streamlit app serves predictions with confidence scores. Next: logging predictions to SQLite. The [Build log](#build-log) records each step and the reasoning behind it.
+> **Status:** in progress. The data has been explored and cleaned, and a TF-IDF + Logistic Regression model (balanced class weights) is trained and saved. A Streamlit app serves predictions with confidence scores, and predictions and user feedback are logged to SQLite. Next: a FastAPI `/predict` endpoint. The [Build log](#build-log) records each step and the reasoning behind it.
 
 ---
 
@@ -36,14 +36,15 @@ news-category-classifier/
 ├── data/                  # downloaded dataset (not committed)
 ├── explore.py             # Step 1: data exploration
 ├── train.py               # Steps 2–3: cleaning, split, training, evaluation
-├── app.py                 # Step 4: Streamlit UI (prediction, confidence, top 3)
+├── app.py                 # Step 4: Streamlit UI (prediction, confidence, top 3, feedback)
+├── db.py                  # Step 6: SQLite logging of predictions and feedback
 ├── results.md             # evaluation report for every training run (appended automatically)
 ├── sample_data.csv        # 50-row toy dataset used for the first prototype
 ├── requirements.txt
 └── README.md
 ```
 
-`model.joblib` (the saved model) is created by `train.py` and isn't committed. Planned: SQLite prediction log, a FastAPI service and a Dockerfile.
+`model.joblib` (the saved model) and `predictions.db` (the prediction log) are created at runtime and aren't committed. Planned: a FastAPI service and a Dockerfile.
 
 ## Getting Started
 
@@ -192,6 +193,14 @@ Committed once Steps 1–3 worked, before starting the app, so there is a known-
 
 **First real log rows** showed typical messy user input: a partly typed headline (`Iphone launc`) was submitted, and still got 98% SCIENCE & TECH from the single word "iphone". User-submitted text and labels need review before they are used for retraining.
 
+**Feedback form.** Below each prediction there is a dropdown preselected with the model's answer, plus a Submit button. If the prediction is right, the user just submits. If it's wrong, they pick the right category first. `is_correct` is inferred as `correct_label == prediction`, and `save_feedback` runs `UPDATE ... WHERE id = ?` on the logged row.
+- The dropdown's `key` includes the row id, so it resets for every new headline.
+- `st.button` is True only on the rerun triggered by the click, so feedback is saved once per click.
+- The feedback code runs *after* logging, so `row_id` always belongs to the current headline.
+- Known limitation: a user who submits without reading the dropdown records "correct" even when it isn't.
+
+Verified: "Apple stock has increased after iPhone launch" was stored as `is_correct = 0`, `correct_label = BUSINESS`, and "New Iphone 18 has been launched" as `is_correct = 1`.
+
 ---
 
 ## Roadmap
@@ -202,7 +211,7 @@ Committed once Steps 1–3 worked, before starting the app, so there is a known-
 - [x] Handle class imbalance and save the model (`model.joblib`)
 - [x] `.gitignore` (venv, data, model) and commit
 - [x] Streamlit app with a confidence score, a "not sure" warning below 50% and the top 3 categories
-- [ ] Log predictions to SQLite
+- [x] Log predictions and user feedback to SQLite
 - [ ] FastAPI `/predict` endpoint
 - [ ] Dockerfile, CI/CD (GitHub Actions) and deployment
 - [ ] Add `short_description` to the input text

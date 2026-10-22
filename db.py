@@ -29,3 +29,11 @@ def log_prediction(headline, predicted, confidence, model_version):
              headline, predicted, float(confidence), model_version),
         )
         return curr.lastrowid
+
+
+def save_feedback(row_id, is_correct, correct_label):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE predictions SET is_correct = ?, correct_label = ? WHERE id = ?",
+            (int(is_correct), correct_label, row_id),
+        )
