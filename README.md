@@ -2,7 +2,7 @@
 
 A machine learning project that reads a news headline and predicts the article's category (for example **Politics**, **Sports**, **Business**, **Science & Tech** or **Entertainment**) with a confidence score.
 
-> **Status:** in progress. The data has been explored and cleaned, and a TF-IDF + Logistic Regression model (balanced class weights) is trained and saved. A Streamlit app serves predictions with confidence scores, and predictions and user feedback are logged to SQLite. Next: a FastAPI `/predict` endpoint. The [Build log](#build-log) records each step and the reasoning behind it.
+> **Status:** in progress. The data has been explored and cleaned, and a TF-IDF + Logistic Regression model (balanced class weights) is trained and saved. A Streamlit app serves predictions with confidence scores, and predictions and user feedback are logged to SQLite. A FastAPI service exposes `/predict`, `/feedback` and `/health`. Next: Docker, then CI/CD and deployment. The [Build log](#build-log) records each step and the reasoning behind it.
 
 ---
 
@@ -38,7 +38,7 @@ news-category-classifier/
 ├── train.py               # Steps 2–3: cleaning, split, training, evaluation
 ├── app.py                 # Step 4: Streamlit UI (prediction, confidence, top 3, feedback)
 ├── db.py                  # Step 6: SQLite logging of predictions and feedback
-├── api.py                 # Step 7: FastAPI service (/predict, /health)
+├── api.py                 # Step 7: FastAPI service (/predict, /feedback, /health)
 ├── results.md             # evaluation report for every training run (appended automatically)
 ├── sample_data.csv        # 50-row toy dataset used for the first prototype
 ├── requirements.txt
@@ -212,6 +212,7 @@ Verified: "Apple stock has increased after iPhone launch" was stored as `is_corr
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/predict` | Body `{"headline": "..."}` → `{"category": ..., "confidence": ...}` |
+| `POST` | `/feedback` | Body `{"prediction_id": 8, "correct_label": "BUSINESS"}` → `{"status": "saved", "is_correct": false}` |
 | `GET` | `/health` | `{"status": "ok", "model_loaded": true}`, for Docker and Cloud Run health checks |
 | `GET` | `/docs` | Interactive documentation, generated automatically by FastAPI |
 
@@ -225,6 +226,18 @@ Verified: "Apple stock has increased after iPhone launch" was stored as `is_corr
 **Logging.** `/predict` reuses `log_prediction` from `db.py`, so API and Streamlit predictions go into the same `predictions` table. The response includes a `prediction_id` (the row id), a receipt number that a client can use to send feedback later.
 - Unlike Streamlit, the API logs **every** request, including the same headline sent twice. Each API call is a separate, deliberate event; Streamlit's duplicates were side effects of reruns, not real user actions. **Rule: one log row per real event.**
 - Known issue: `MODEL_VERSION` is defined in both `app.py` and `api.py`. It should live in one place before the first retrain, so logged versions can't drift apart.
+
+**Feedback endpoint.** `/feedback` lets any client correct a prediction using its `prediction_id`. Validation:
+
+| Bad input | Response | Why |
+|---|---|---|
+| Unknown label (`"SPORT"`, `"TECH"`, `"banana"`) | **422**, with the list of valid categories | Junk labels would create new categories at retraining and undo the 42 → 16 label design. The model's `classes_` is the single source of truth. |
+| `prediction_id` that doesn't exist | **404** "Prediction not found" | Otherwise `UPDATE ... WHERE id = ?` would silently change 0 rows, and the client would think it worked |
+| `prediction_id` that isn't a number | **422** (automatic, from the `int` type hint) | |
+
+- `is_correct` is **computed by the server** (the stored prediction compared with the label), never sent by the client. Don't trust the client with anything the server can work out.
+- Cheap checks come first (the label, in memory), then the database lookup.
+- **Bug found:** a typo inside a SQL string (`predcited`) caused a **500**. Python doesn't check SQL text, so this kind of error only shows up when the query runs. This is a strong argument for automated tests that call every endpoint (Step 8).
 
 Run it with `uvicorn api:app --reload` and open http://127.0.0.1:8000/docs.
 
@@ -322,7 +335,7 @@ Questions an interviewer might ask about this project, with model answers based 
 - [x] `.gitignore` (venv, data, model) and commit
 - [x] Streamlit app with a confidence score, a "not sure" warning below 50% and the top 3 categories
 - [x] Log predictions and user feedback to SQLite
-- [ ] FastAPI `/predict` endpoint
+- [x] FastAPI service: `/predict`, `/feedback`, `/health`
 - [ ] Dockerfile, CI/CD (GitHub Actions) and deployment
 - [ ] Add `short_description` to the input text
 - [ ] React frontend; fine-tune DistilBERT and compare it with the baseline

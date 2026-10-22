@@ -1,7 +1,7 @@
 import joblib
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
-from db import init_db, log_prediction
+from db import init_db, log_prediction, get_prediction, save_feedback
 
 app = FastAPI(title='News Headline Classifier')
 model = joblib.load('model.joblib')
@@ -36,3 +36,27 @@ def predict(req: PredictRequest):
     prediction_id = log_prediction(
         req.headline, category, confidence, MODEL_VERSION)
     return PredictResponse(prediction_id=prediction_id, category=category, confidence=confidence)
+
+
+class FeedbackRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    prediction_id: int
+    correct_label: str
+
+
+@app.post('/feedback')
+def feedback(req: FeedbackRequest):
+    if req.correct_label not in model.classes_.tolist():
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown category. Use one of: {model.classes_.tolist()}",
+        )
+
+    predicted = get_prediction(req.prediction_id)
+    if predicted is None:
+        raise HTTPException(status_code=404, detail="Prediction not found")
+
+    is_correct = req.correct_label == predicted
+    save_feedback(req.prediction_id, is_correct, req.correct_label)
+    return {"status": "saved", "is_correct": is_correct}

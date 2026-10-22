@@ -37,3 +37,11 @@ def save_feedback(row_id, is_correct, correct_label):
             "UPDATE predictions SET is_correct = ?, correct_label = ? WHERE id = ?",
             (int(is_correct), correct_label, row_id),
         )
+
+
+def get_prediction(row_id):
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            'SELECT predicted FROM predictions WHERE id = ?', (row_id,)
+        ).fetchone()
+    return row[0] if row else None
