@@ -41,6 +41,8 @@ news-category-classifier/
 ├── api.py                 # Step 7: FastAPI service (/predict, /feedback, /health)
 ├── results.md             # evaluation report for every training run (appended automatically)
 ├── sample_data.csv        # 50-row toy dataset used for the first prototype
+├── Dockerfile             # Step 8: API container image
+├── .dockerignore          # keeps venv, data and user data out of the image
 ├── requirements-api.txt   # pinned packages for the API image
 ├── requirements.txt       # everything for local development (includes the API file)
 └── README.md
@@ -248,6 +250,8 @@ Run it with `uvicorn api:app --reload` and open http://127.0.0.1:8000/docs.
 
 Order: **Docker image → test the container locally → push to a registry → host it (public URL) → CI/CD to automate it all.** Hosting without Docker is possible on some platforms (Render can run Python directly), but the missing model and version pinning would still have to be solved, Cloud Run requires a container, and an image lets us switch hosts without changes.
 
+**Why CI/CD builds the image automatically (later in Step 8):** so that what runs in production is exactly what's in git, never "whatever was on my laptop, including uncommitted changes". Every change is tested and built the same way, broken code or a broken Dockerfile is caught before it reaches users, and each image is tagged with its commit, so any deployed version can be traced or rolled back. Usual setup: run tests on every push or pull request; build and deploy only when changes are merged into `main`.
+
 **What goes inside the image**, found by reading `api.py` line by line: Python 3.13, pinned packages, the code (`api.py`, `db.py`), the model (`model.joblib`), the start command (`uvicorn ...`) and a port.
 
 **Step 8a: pin exact versions.** Without `==`, Docker installs whatever is newest on build day, which could be a scikit-learn or numpy version that can't load `model.joblib`. Versions were taken from `pip freeze` in the venv the model was trained with (Python 3.13.12). numpy and scipy are pinned too: they aren't imported directly, but the saved model depends on them.
@@ -261,6 +265,31 @@ Two files, so the API image stays small and each version is written once:
 
 Streamlit and pandas are left out of the API image because the API doesn't use them, and Streamlit alone pulls in hundreds of MB of dependencies. A smaller image means faster builds, deploys and cold starts, and less third-party code to patch.
 
+**Step 8b: Dockerfile.** Each line maps to one ingredient:
+
+```dockerfile
+FROM python:3.13.12-slim                 # OS + the exact Python version used for training
+WORKDIR /app
+COPY requirements-api.txt .
+RUN pip install --no-cache-dir -r requirements-api.txt   # pinned packages
+COPY api.py db.py model.joblib ./        # code + model
+EXPOSE 8000                              # port
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]   # start command
+```
+
+- **Layer order matters.** Requirements are copied and installed *before* the code. Docker caches each layer, so editing `api.py` only rebuilds the last `COPY`, and the slow `pip install` layer is reused.
+- **`--host 0.0.0.0`**: inside a container, `127.0.0.1` only accepts connections from the container itself, so requests from the laptop would be refused.
+- **`.dockerignore`** keeps `venv/` (520 MB), `data/` (83 MB), `predictions.db` (user data), `__pycache__/` and `.git/` out of the build context.
+
+Build and run:
+
+```bash
+docker build -t news-classifier-api .
+docker run -p 8000:8000 news-classifier-api   # -p laptop_port:container_port
+```
+
+**Verified:** image size 449 MB; `/health` returns `{"status":"ok","model_loaded":true}`; `/predict` returns SPORTS at 0.5935 for the Lakers headline, identical to the local run, which confirms the same model and package versions. The first prediction in the container got `prediction_id: 1`: the container starts with its own empty `predictions.db`, not the laptop's. This shows the "SQLite is wiped on cloud hosts" issue in practice.
+
 ---
 
 ## Known issues and decisions to revisit
@@ -272,7 +301,8 @@ Problems we know about but have deliberately postponed, with the reason and the 
 | **SQLite file is wiped on cloud hosts** | Cloud Run and similar hosts use temporary disks. When the container restarts, scales or redeploys, `predictions.db` and all logged predictions and feedback disappear without warning (like leaving things in a hotel room at checkout). | Move logging to a managed database outside the container (e.g. Postgres). Only `db.py` needs to change, because all database code lives there. | At deployment (Step 8) |
 | ~~**scikit-learn version must match**~~ ✅ fixed | A model saved with one scikit-learn version may fail to load, or behave differently, under another. | Direct dependencies pinned with `==` in `requirements-api.txt` (Step 8a). | Done |
 | **Indirect dependencies aren't pinned** | Packages our packages depend on (e.g. starlette, pydantic-core) are only constrained with `>=`, so a future build could still pull different versions. | Generate a full lock file (e.g. `pip freeze` in the container, or a tool like pip-tools or uv) and install from it. | Before production deployment |
-| **`model.joblib` isn't in git** | A fresh machine or host has no model file, so `api.py` would fail on startup. | Copy the model into the Docker image, or train it during the image build. | Docker (Step 8) |
+| ~~**`model.joblib` isn't in git**~~ ✅ fixed | A fresh machine or host has no model file, so `api.py` would fail on startup. | The model is copied into the Docker image (Step 8b). CI will need a way to get or rebuild it, because it isn't in the repo. | Done (CI follow-up in Step 8) |
+| **Container runs as root** | The API process runs as the `root` user inside the container. If an attacker exploits a bug in the API, they get full control of the container. | Add a non-root user in the Dockerfile (`RUN useradd ...` + `USER appuser`). | Before production deployment |
 | **`MODEL_VERSION` is defined twice** (`app.py` and `api.py`) | After a retrain, updating one and forgetting the other makes logged versions wrong and breaks v1-vs-v2 comparisons. | Move it to one shared place (e.g. a `config.py`). | Before the first retrain |
 | **Feedback can be careless or malicious** | Users can submit without reading the dropdown, or send deliberately wrong labels through `/feedback`. | Review feedback before retraining; ship a new model only if it beats the current one on a fixed test set. | Retraining step |
 | **Confidence ≠ correctness** | Strong words (e.g. "apple", "iphone") can produce 99% confidence on headlines that really belong to two categories. | Show the top 3 (done); later compare with DistilBERT and consider probability calibration. | Model improvement |
