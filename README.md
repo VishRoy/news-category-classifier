@@ -43,8 +43,11 @@ news-category-classifier/
 ├── sample_data.csv        # 50-row toy dataset used for the first prototype
 ├── Dockerfile             # Step 8: API container image
 ├── .dockerignore          # keeps venv, data and user data out of the image
+├── tests/test_api.py      # Step 8: API tests (pytest + FastAPI TestClient)
+├── pytest.ini             # adds the project root to the import path for tests
 ├── requirements-api.txt   # pinned packages for the API image
-├── requirements.txt       # everything for local development (includes the API file)
+├── requirements-dev.txt   # API packages + test tools (used by CI)
+├── requirements.txt       # everything for local development
 └── README.md
 ```
 
@@ -207,6 +210,10 @@ A record of what was done at each step and why.
 
 ### Step 3: Train and evaluate
 
+**Why no NLTK:** `TfidfVectorizer` already tokenizes and lowercases, and TF-IDF gives very common words (*the, in, of*) a low IDF weight, so stop-word removal adds little. The only NLTK feature likely to help is stemming or lemmatization (`elections` → `election`). It wasn't used, to keep the baseline simple, and because any preprocessing must live *inside* the Pipeline, otherwise `api.py` and `train.py` would see different text. It's a candidate experiment.
+
+**Why Logistic Regression over Naive Bayes:** Naive Bayes is *generative*. It counts how likely each word is in each class and assumes words are independent. That makes training very fast and works well on small data, but correlated words ("New" + "York") get counted twice, which pushes probabilities to extremes. Logistic Regression is *discriminative*: it learns all the word weights jointly to separate the classes, which usually wins with large data (143k training headlines here) and gives more sensible probabilities, which the app's confidence display relies on. Candidate experiment: swap in `ComplementNB` (a Naive Bayes variant designed for imbalanced text) and compare macro-F1 in `results.md`.
+
 **Pipeline:** `TfidfVectorizer()` → `LogisticRegression(max_iter=1000)`. Bundling them means the exact same text processing runs during training and prediction, and the vocabulary is learned from the training data only. Vocabulary: **48,691 words**.
 
 **Baseline result:** accuracy 0.72, macro recall 0.59.
@@ -333,9 +340,33 @@ Run it with `uvicorn api:app --reload` and open http://127.0.0.1:8000/docs.
 
 **Why Docker comes before hosting:** a host such as Render or Cloud Run starts the API on a fresh, empty machine. That machine has no Python 3.13, no venv, no installed packages (or the exact versions we used), and no `model.joblib`, which is git-ignored and therefore not on GitHub. A Docker image packages all of this (OS base, Python, pinned packages, code, model) into one unit that runs the same on any machine. Packing comes before moving house.
 
+**Hosting choice: Google Cloud (GCP), with Cloud Run.** A major cloud provider was preferred over Render for real-world relevance. Cloud Run runs a container image directly, scales to zero when idle, and fits with Artifact Registry (images) and Cloud Storage (model files) on the same platform.
+
 Order: **Docker image → test the container locally → push to a registry → host it (public URL) → CI/CD to automate it all.** Hosting without Docker is possible on some platforms (Render can run Python directly), but the missing model and version pinning would still have to be solved, Cloud Run requires a container, and an image lets us switch hosts without changes.
 
 **Why write tests when we already have Docker and SQLite:** they do different jobs. Docker *packages* the code, SQLite *stores* the data, and tests *check that the code behaves correctly*. Docker packages a bug just as faithfully as working code: the `predcited` SQL typo would have built into a perfectly good image and returned 500 to every `/feedback` caller. Tests also protect future changes, e.g. when `db.py` moves to Postgres, the same tests show that `/predict` and `/feedback` still behave as before. CI runs them on every push, so nobody has to remember to.
+
+**Step 8-CI-a: tests (`tests/test_api.py`).** Run them with `python -m pytest -v`. Using `python -m` guarantees that pytest comes from the active venv; plain `pytest` once picked up the system Python's pytest, which has no fastapi.
+
+- **No real model needed.** A session-scoped fixture trains a tiny 6-headline model in a temporary folder and points the app at it through the `MODEL_PATH` environment variable (`api.py` falls back to `model.joblib` when it isn't set). It also points `db.DB_PATH` at a temporary database, so tests never touch the real `predictions.db`. `import api` happens *inside* the fixture, because `api.py` loads the model and creates the table at import time.
+- **Tests check the contract, not accuracy:** status codes, response fields, and types. Model quality is measured by `train.py` and `results.md`.
+
+| Test | Checks |
+|---|---|
+| `test_health` | 200 and `model_loaded: true` |
+| `test_predict_returns_valid_response` | Known category, confidence between 0 and 1, integer `prediction_id` |
+| `test_predict_rejects_bad_input` (×3, parametrized) | 422 for `""`, `"   "` and a wrong field name |
+| `test_feedback_rejects_unknown_label` | 422, and the message lists the valid labels |
+| `test_feedback_unknown_prediction_id` | 404 for a missing id |
+| `test_predict_then_feedback` | Full loop with a real id; `is_correct` computed correctly both ways |
+
+**Checking that the tests can fail:** reintroducing the old `predcited` SQL typo made exactly the 2 tests that reach `get_prediction` fail with `no such column: predcited`. The unknown-label test still passed, because the label check stops the request before the database is queried (cheap checks first). A test that can never fail protects nothing.
+
+| Requirements file | Contents | Used by |
+|---|---|---|
+| `requirements-api.txt` | API packages | Docker image |
+| `requirements-dev.txt` | `-r requirements-api.txt` + pytest, httpx | CI |
+| `requirements.txt` | `-r requirements-dev.txt` + pandas, streamlit | Laptop |
 
 **Why CI/CD builds the image automatically (later in Step 8):** so that what runs in production is exactly what's in git, never "whatever was on my laptop, including uncommitted changes". Every change is tested and built the same way, broken code or a broken Dockerfile is caught before it reaches users, and each image is tagged with its commit, so any deployed version can be traced or rolled back. Usual setup: run tests on every push or pull request; build and deploy only when changes are merged into `main`.
 
@@ -389,6 +420,8 @@ Problems we know about but have deliberately postponed, with the reason and the 
 | ~~**scikit-learn version must match**~~ ✅ fixed | A model saved with one scikit-learn version may fail to load, or behave differently, under another. | Direct dependencies pinned with `==` in `requirements-api.txt` (Step 8a). | Done |
 | **Indirect dependencies aren't pinned** | Packages our packages depend on (e.g. starlette, pydantic-core) are only constrained with `>=`, so a future build could still pull different versions. | Generate a full lock file (e.g. `pip freeze` in the container, or a tool like pip-tools or uv) and install from it. | Before production deployment |
 | ~~**`model.joblib` isn't in git**~~ ✅ fixed | A fresh machine or host has no model file, so `api.py` would fail on startup. | The model is copied into the Docker image (Step 8b). CI will need a way to get or rebuild it, because it isn't in the repo. | Done (CI follow-up in Step 8) |
+| **CI can't build the real image** | The Dockerfile copies `model.joblib`, which isn't in git, so `docker build` on GitHub's machine fails with "not found". (Tests avoid this by training a tiny model.) | Store trained models outside git, e.g. a Google Cloud Storage bucket, with CI downloading the right version before `docker build`. | CI job 2 (Step 8) |
+| **Image is built for ARM (Apple Silicon)** | The laptop is `arm64`, but cloud servers run `amd64`. An ARM image fails on Cloud Run with `exec format error`. | Build with `docker build --platform linux/amd64` (or build in CI, which runs on amd64). | Before the first deploy |
 | **Container runs as root** | The API process runs as the `root` user inside the container. If an attacker exploits a bug in the API, they get full control of the container. | Add a non-root user in the Dockerfile (`RUN useradd ...` + `USER appuser`). | Before production deployment |
 | **`MODEL_VERSION` is defined twice** (`app.py` and `api.py`) | After a retrain, updating one and forgetting the other makes logged versions wrong and breaks v1-vs-v2 comparisons. | Move it to one shared place (e.g. a `config.py`). | Before the first retrain |
 | **Feedback can be careless or malicious** | Users can submit without reading the dropdown, or send deliberately wrong labels through `/feedback`. | Review feedback before retraining; ship a new model only if it beats the current one on a fixed test set. | Retraining step |

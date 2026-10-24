@@ -1,10 +1,12 @@
+import os
 import joblib
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from db import init_db, log_prediction, get_prediction, save_feedback
 
 app = FastAPI(title='News Headline Classifier')
-model = joblib.load('model.joblib')
+MODEL_PATH = os.environ.get("MODEL_PATH", "model.joblib")
+model = joblib.load(MODEL_PATH)
 
 MODEL_VERSION = "v1-tfidf-logreg-balanced"
 init_db()
