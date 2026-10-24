@@ -1,8 +1,10 @@
 # News Category Classifier
 
+[![CI](https://github.com/VishRoy/news-category-classifier/actions/workflows/ci.yml/badge.svg)](https://github.com/VishRoy/news-category-classifier/actions/workflows/ci.yml)
+
 A machine learning project that reads a news headline and predicts the article's category (for example **Politics**, **Sports**, **Business**, **Science & Tech** or **Entertainment**) with a confidence score.
 
-> **Status:** in progress. The data has been explored and cleaned, and a TF-IDF + Logistic Regression model (balanced class weights) is trained and saved. A Streamlit app serves predictions with confidence scores, and predictions and user feedback are logged to SQLite. A FastAPI service exposes `/predict`, `/feedback` and `/health`. Next: Docker, then CI/CD and deployment. The [Build log](#build-log) records each step and the reasoning behind it.
+> **Status:** in progress. The data has been explored and cleaned, and a TF-IDF + Logistic Regression model (balanced class weights) is trained and saved. A Streamlit app serves predictions with confidence scores, and predictions and user feedback are logged to SQLite. A FastAPI service exposes `/predict`, `/feedback` and `/health`, packaged as a Docker image and tested on every push by GitHub Actions. Next: deployment to Google Cloud Run. The [Build log](#build-log) records each step and the reasoning behind it.
 
 ---
 
@@ -368,6 +370,13 @@ Order: **Docker image → test the container locally → push to a registry → 
 | `requirements-dev.txt` | `-r requirements-api.txt` + pytest, httpx | CI |
 | `requirements.txt` | `-r requirements-dev.txt` + pandas, streamlit | Laptop |
 
+**Step 8-CI-b: GitHub Actions (`.github/workflows/ci.yml`).** On every push to `main` and every pull request, GitHub starts a fresh Ubuntu machine, checks out the repo, installs `requirements-dev.txt` (with pip caching), and runs `python -m pytest -v`. The first green run took **29 s**. It passes without `model.joblib`, because the tests train their own tiny model. That's the point of the `MODEL_PATH` setting.
+
+- The machine is brand new each time: no venv, no data, no model. If the tests pass there, they don't secretly depend on something only the laptop has.
+- Action versions are pinned (`checkout@v5`, `setup-python@v6`), like `==` in requirements.
+- CI uses Python `"3.13"` (latest patch release); the Docker image pins `3.13.12` exactly, because the image is what gets deployed.
+- **First attempt failed** with `No event triggers defined in 'on'`: the file had been committed while still empty (unsaved in the editor). `git diff --staged` before committing would have shown it.
+
 **Why CI/CD builds the image automatically (later in Step 8):** so that what runs in production is exactly what's in git, never "whatever was on my laptop, including uncommitted changes". Every change is tested and built the same way, broken code or a broken Dockerfile is caught before it reaches users, and each image is tagged with its commit, so any deployed version can be traced or rolled back. Usual setup: run tests on every push or pull request; build and deploy only when changes are merged into `main`.
 
 **What goes inside the image**, found by reading `api.py` line by line: Python 3.13, pinned packages, the code (`api.py`, `db.py`), the model (`model.joblib`), the start command (`uvicorn ...`) and a port.
@@ -523,7 +532,9 @@ Questions an interviewer might ask about this project, with model answers based 
 - [x] Streamlit app with a confidence score, a "not sure" warning below 50% and the top 3 categories
 - [x] Log predictions and user feedback to SQLite
 - [x] FastAPI service: `/predict`, `/feedback`, `/health`
-- [ ] Dockerfile, CI/CD (GitHub Actions) and deployment
+- [x] Dockerfile, pinned requirements
+- [x] Tests (pytest) and CI on GitHub Actions
+- [ ] Build the image in CI, push to Artifact Registry, deploy to Cloud Run
 - [ ] Add `short_description` to the input text
 - [ ] React frontend; fine-tune DistilBERT and compare it with the baseline
 
