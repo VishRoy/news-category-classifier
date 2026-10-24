@@ -48,7 +48,92 @@ news-category-classifier/
 └── README.md
 ```
 
-`model.joblib` (the saved model) and `predictions.db` (the prediction log) are created at runtime and aren't committed. Planned: a FastAPI service and a Dockerfile.
+`model.joblib` (the saved model) and `predictions.db` (the prediction log) are created at runtime and aren't committed.
+
+## Architecture
+
+### System overview
+
+Training happens once, offline. Serving loads the saved model and logs every prediction.
+
+```mermaid
+flowchart LR
+    subgraph Training["Training (offline, on the laptop)"]
+        K["Kaggle dataset<br/>data/News_Category_Dataset_v3.json"] --> T["train.py<br/>clean, map 42 to 16 labels, split, fit"]
+        T --> M[("model.joblib<br/>TF-IDF + LogReg pipeline")]
+        T --> R["results.md<br/>report for every run"]
+    end
+
+    subgraph Serving["Serving"]
+        U1["Person in a browser"] --> S["app.py<br/>Streamlit UI"]
+        U2["Program: React app, mobile app, script"] -->|"HTTP + JSON"| A["api.py<br/>FastAPI"]
+        S --> D["db.py<br/>shared database functions"]
+        A --> D
+        D --> DB[("predictions.db<br/>SQLite")]
+    end
+
+    M -->|"loaded once at start"| S
+    M -->|"loaded once at start"| A
+    M -.->|"copied into"| I["Docker image<br/>api.py + db.py + model + pinned packages"]
+```
+
+### `/predict`: request flow, including errors
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant P as Pydantic validation
+    participant API as api.py
+    participant M as Model
+    participant DB as db.py + SQLite
+
+    C->>P: POST /predict with a headline
+    Note over P: strip whitespace, then require at least 1 character
+    alt headline missing, empty or only spaces
+        P-->>C: 422 (missing or string_too_short)
+    else valid
+        P->>API: PredictRequest
+        API->>M: predict_proba(headline)
+        M-->>API: 16 probabilities
+        API->>DB: log_prediction (INSERT)
+        DB-->>API: lastrowid, the new prediction_id
+        API-->>C: 200 with prediction_id, category, confidence
+    end
+```
+
+The database assigns `prediction_id` with `AUTOINCREMENT`, so ids are unique and never reused. Clients never choose them; they receive one as a receipt.
+
+### `/feedback`: decision flow, including errors
+
+```mermaid
+flowchart TD
+    F["POST /feedback<br/>prediction_id + correct_label"] --> V{"Pydantic: both fields present<br/>and prediction_id is an integer?"}
+    V -- no --> E1["422 validation error"]
+    V -- yes --> L{"correct_label in model.classes_?<br/>case-sensitive"}
+    L -- no --> E2["422 Unknown category<br/>plus the list of 16 valid labels"]
+    L -- yes --> G["get_prediction<br/>SELECT predicted WHERE id = ?"]
+    G --> X{"row found?"}
+    X -- no --> E3["404 Prediction not found"]
+    X -- yes --> CMP["is_correct = correct_label == predicted<br/>computed by the server, not the client"]
+    CMP --> UPD["save_feedback<br/>UPDATE ... WHERE id = ?"]
+    UPD --> OK["200 status saved + is_correct"]
+```
+
+The checks run cheapest first: field types (no work), then the label (an in-memory list), then the database lookup. The server can check that a label is **valid**, but not that it is **true**: `{"prediction_id": 8, "correct_label": "SPORTS"}` passes every check even for a tech headline. That is why feedback is reviewed before retraining.
+
+### Status codes
+
+| Code | Meaning | Whose fault | Examples in this project |
+|---|---|---|---|
+| **200** | OK | – | Successful prediction or feedback |
+| **404** | Not found | Caller | `/feedback` with an id that doesn't exist; a path that doesn't exist (e.g. `GET /`) |
+| **422** | Request doesn't match the contract | Caller | Missing field, empty or whitespace-only headline, non-integer id, unknown or lowercase label |
+| **500** | Internal server error | **Us** | An unhandled exception, e.g. the SQL typo `predcited`. Every 500 is a bug to fix |
+
+### Streamlit path
+
+`app.py` uses the same model and the same `db.py` functions, with one difference: Streamlit re-runs the whole script on every interaction. So it keeps `last_logged` and `row_id` in `st.session_state` to log each headline once and attach feedback to the right row. The API needs no such guard, because each request is a separate, real event.
 
 ## Getting Started
 
@@ -249,6 +334,8 @@ Run it with `uvicorn api:app --reload` and open http://127.0.0.1:8000/docs.
 **Why Docker comes before hosting:** a host such as Render or Cloud Run starts the API on a fresh, empty machine. That machine has no Python 3.13, no venv, no installed packages (or the exact versions we used), and no `model.joblib`, which is git-ignored and therefore not on GitHub. A Docker image packages all of this (OS base, Python, pinned packages, code, model) into one unit that runs the same on any machine. Packing comes before moving house.
 
 Order: **Docker image → test the container locally → push to a registry → host it (public URL) → CI/CD to automate it all.** Hosting without Docker is possible on some platforms (Render can run Python directly), but the missing model and version pinning would still have to be solved, Cloud Run requires a container, and an image lets us switch hosts without changes.
+
+**Why write tests when we already have Docker and SQLite:** they do different jobs. Docker *packages* the code, SQLite *stores* the data, and tests *check that the code behaves correctly*. Docker packages a bug just as faithfully as working code: the `predcited` SQL typo would have built into a perfectly good image and returned 500 to every `/feedback` caller. Tests also protect future changes, e.g. when `db.py` moves to Postgres, the same tests show that `/predict` and `/feedback` still behave as before. CI runs them on every push, so nobody has to remember to.
 
 **Why CI/CD builds the image automatically (later in Step 8):** so that what runs in production is exactly what's in git, never "whatever was on my laptop, including uncommitted changes". Every change is tested and built the same way, broken code or a broken Dockerfile is caught before it reaches users, and each image is tagged with its commit, so any deployed version can be traced or rolled back. Usual setup: run tests on every push or pull request; build and deploy only when changes are merged into `main`.
 
