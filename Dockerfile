@@ -5,7 +5,11 @@ WORKDIR /app
 COPY requirements-api.txt .
 RUN pip install --no-cache-dir -r requirements-api.txt
 
-COPY api.py db.py model.joblib ./
+RUN useradd --create-home appuser && chown appuser:appuser /app
+
+COPY --chown=appuser:appuser api.py db.py model.joblib ./
+
+USER appuser
 
 EXPOSE 8000
 

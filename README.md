@@ -344,6 +344,26 @@ Run it with `uvicorn api:app --reload` and open http://127.0.0.1:8000/docs.
 
 **Hosting choice: Google Cloud (GCP), with Cloud Run.** A major cloud provider was preferred over Render for real-world relevance. Cloud Run runs a container image directly, scales to zero when idle, and fits with Artifact Registry (images) and Cloud Storage (model files) on the same platform.
 
+**Cost guardrails.** The account's free trial had already been used, so this runs on a full (paid) account and relies on the always-free tier. Charges are possible if limits are exceeded, so:
+- Region **`us-central1`**: some always-free limits (e.g. Cloud Storage) apply only in US regions.
+- Cloud Run with **`--max-instances=1`** and scale to zero, so traffic can't multiply the cost.
+- Artifact Registry free storage is about 0.5 GB and the image is 449 MB, so only the latest image is kept.
+- No Cloud SQL (not free, charged even when idle); a free Postgres option will be chosen in Block B.
+- A **budget alert** emails at 50/90/100%. Note: alerts only notify, they don't stop spending.
+
+**Step 8-CD-a: GCP setup.**
+- Project `news-classifier-512612`.
+- `gcloud` CLI installed with Homebrew (`brew install --cask gcloud-cli`); its folder added to `PATH` in `~/.zshrc`. `gcloud` bundles its own Python, separate from the project venv.
+- `gcloud init` signed in and set the default project. It also tried to set a default compute zone, which needs the **Compute Engine API**. That was deliberately left disabled, because Cloud Run doesn't need VMs, and unused services stay off.
+- Cloud Run's default region set directly instead: `gcloud config set run/region us-central1`.
+- **GCP concept: every API is disabled in a new project** and must be enabled one by one (Cloud Run, Artifact Registry, Cloud Storage). Enabling is free; only usage is billed.
+
+**Step 8-CD-b: production-ready image.**
+- **Non-root user.** Docker runs everything as `root` unless the Dockerfile has a `USER` line. The base image's default user is root (confirmed: `docker run --rm news-classifier-api whoami` printed `root`). The Dockerfile now creates `appuser` and switches to it (least privilege): if the API were compromised, the attacker wouldn't have admin rights in the container. `pip install` still runs as root *before* `USER`, because packages go into system folders.
+- **`chown appuser /app` is required:** `init_db()` creates `predictions.db` in `/app` at startup. Without write permission there, the API would crash with `unable to open database file`.
+- **Built for `amd64`:** `docker build --platform linux/amd64 ...`, because the Mac is `arm64` and Cloud Run servers are `amd64`. On the Mac, the build and run use emulation, so they are slower.
+- **Verified:** architecture `amd64`; `whoami` → `appuser`; all files in `/app`, including the new `predictions.db`, owned by `appuser`; `/health` OK; Lakers prediction **0.593511651841972**, identical to the laptop and the ARM image (a different CPU doesn't change the model's maths). The amd64 image is 408 MB.
+
 Order: **Docker image → test the container locally → push to a registry → host it (public URL) → CI/CD to automate it all.** Hosting without Docker is possible on some platforms (Render can run Python directly), but the missing model and version pinning would still have to be solved, Cloud Run requires a container, and an image lets us switch hosts without changes.
 
 **Why write tests when we already have Docker and SQLite:** they do different jobs. Docker *packages* the code, SQLite *stores* the data, and tests *check that the code behaves correctly*. Docker packages a bug just as faithfully as working code: the `predcited` SQL typo would have built into a perfectly good image and returned 500 to every `/feedback` caller. Tests also protect future changes, e.g. when `db.py` moves to Postgres, the same tests show that `/predict` and `/feedback` still behave as before. CI runs them on every push, so nobody has to remember to.
@@ -399,7 +419,9 @@ FROM python:3.13.12-slim                 # OS + the exact Python version used fo
 WORKDIR /app
 COPY requirements-api.txt .
 RUN pip install --no-cache-dir -r requirements-api.txt   # pinned packages
-COPY api.py db.py model.joblib ./        # code + model
+RUN useradd --create-home appuser && chown appuser:appuser /app   # non-root user (added in 8-CD-b)
+COPY --chown=appuser:appuser api.py db.py model.joblib ./         # code + model
+USER appuser                             # everything after this runs without admin rights
 EXPOSE 8000                              # port
 CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]   # start command
 ```
@@ -430,8 +452,8 @@ Problems we know about but have deliberately postponed, with the reason and the 
 | **Indirect dependencies aren't pinned** | Packages our packages depend on (e.g. starlette, pydantic-core) are only constrained with `>=`, so a future build could still pull different versions. | Generate a full lock file (e.g. `pip freeze` in the container, or a tool like pip-tools or uv) and install from it. | Before production deployment |
 | ~~**`model.joblib` isn't in git**~~ ✅ fixed | A fresh machine or host has no model file, so `api.py` would fail on startup. | The model is copied into the Docker image (Step 8b). CI will need a way to get or rebuild it, because it isn't in the repo. | Done (CI follow-up in Step 8) |
 | **CI can't build the real image** | The Dockerfile copies `model.joblib`, which isn't in git, so `docker build` on GitHub's machine fails with "not found". (Tests avoid this by training a tiny model.) | Store trained models outside git, e.g. a Google Cloud Storage bucket, with CI downloading the right version before `docker build`. | CI job 2 (Step 8) |
-| **Image is built for ARM (Apple Silicon)** | The laptop is `arm64`, but cloud servers run `amd64`. An ARM image fails on Cloud Run with `exec format error`. | Build with `docker build --platform linux/amd64` (or build in CI, which runs on amd64). | Before the first deploy |
-| **Container runs as root** | The API process runs as the `root` user inside the container. If an attacker exploits a bug in the API, they get full control of the container. | Add a non-root user in the Dockerfile (`RUN useradd ...` + `USER appuser`). | Before production deployment |
+| ~~**Image is built for ARM (Apple Silicon)**~~ ✅ fixed | The laptop is `arm64`, but cloud servers run `amd64`. An ARM image fails on Cloud Run with `exec format error`. | Built with `docker build --platform linux/amd64` (Step 8-CD-b). CI runners are amd64 already. | Done |
+| ~~**Container runs as root**~~ ✅ fixed | The API process ran as `root` inside the container. If an attacker exploited a bug in the API, they'd get full control of the container. | Non-root `appuser` in the Dockerfile (Step 8-CD-b). | Done |
 | **`MODEL_VERSION` is defined twice** (`app.py` and `api.py`) | After a retrain, updating one and forgetting the other makes logged versions wrong and breaks v1-vs-v2 comparisons. | Move it to one shared place (e.g. a `config.py`). | Before the first retrain |
 | **Feedback can be careless or malicious** | Users can submit without reading the dropdown, or send deliberately wrong labels through `/feedback`. | Review feedback before retraining; ship a new model only if it beats the current one on a fixed test set. | Retraining step |
 | **Confidence ≠ correctness** | Strong words (e.g. "apple", "iphone") can produce 99% confidence on headlines that really belong to two categories. | Show the top 3 (done); later compare with DistilBERT and consider probability calibration. | Model improvement |
@@ -513,6 +535,24 @@ Questions an interviewer might ask about this project, with model answers based 
 <summary><b>Q9. Streamlit reruns the whole script on every click. What problems did that cause, and how did you solve them?</b></summary>
 
 "Streamlit re-executes the whole script on every interaction, which caused three problems. One: the model would reload from disk each time, so I cached it with `st.cache_resource`. Two: every rerun would log the same prediction again, because the headline is still in the text box, so I stored the last logged headline in `session_state` and only insert when it changes. Three: the feedback form had to update the right database row, so I keep the row id in `session_state`, give the dropdown a key per row so it resets for each new headline, and rely on `st.button` returning True only on the click's own rerun. I even hit an indentation bug where a heading only appeared on the first run, which is a typical rerun issue."
+</details>
+
+### The project pitch
+
+<details>
+<summary><b>Q12. "Tell me about this project." (60 seconds)</b></summary>
+
+"I built a news headline classifier end to end, from data to a tested, containerised API. It takes a headline and predicts one of 16 categories with a confidence score.
+
+I used the HuffPost News Category dataset, about 200k headlines. Its 42 original labels were messy, so I merged renamed and overlapping ones and dropped labels that describe the audience rather than the topic, ending with 16. I deduplicated and did a stratified 80/20 split.
+
+The model is TF-IDF plus Logistic Regression. The baseline scored 72% accuracy, but it almost ignored small categories: education recall was 31%. With balanced class weights, accuracy dropped to 69%, education recall doubled to 62%, and macro-F1 stayed at 0.63, so I shipped the fairer model.
+
+On the engineering side, there's a Streamlit UI for people and a FastAPI service for programs, both logging predictions and user feedback to SQLite. The API is packaged with Docker, and GitHub Actions runs 8 tests on every push.
+
+One challenge: a typo inside a SQL string caused a 500 error that Python couldn't catch. I wrote tests for every feedback path, then put the typo back on purpose to prove the tests catch it."
+
+*Key points: one clear sentence on what it does; real numbers (never "I don't remember"); mention the train/test split, otherwise it sounds like the model was evaluated on its training data; cover the engineering, not just the model; pick a challenge with a diagnosis and a fix. Describe it honestly as a personal project unless it really runs in a company product.*
 </details>
 
 ### Not yet practised
